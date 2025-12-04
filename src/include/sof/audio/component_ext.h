@@ -152,6 +152,8 @@ static inline int comp_trigger_local(struct comp_dev *dev, int cmd)
 	int ret;
 
 	ret = dev->drv->ops.trigger(dev, cmd);
+	if (ret)
+		return ret;
 
 	/* start a thread in case of shared component or DP scheduling */
 	if (dev->task) {
@@ -159,12 +161,11 @@ static inline int comp_trigger_local(struct comp_dev *dev, int cmd)
 		switch (cmd) {
 		case COMP_TRIGGER_START:
 		case COMP_TRIGGER_RELEASE:
-			schedule_task(dev->task, 0, dev->period);
+			ret = schedule_task(dev->task, 0, dev->period);
 			break;
 		case COMP_TRIGGER_XRUN:
 		case COMP_TRIGGER_PAUSE:
 		case COMP_TRIGGER_STOP:
-			schedule_task_cancel(dev->task);
 			break;
 		}
 	}

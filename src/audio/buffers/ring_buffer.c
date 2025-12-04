@@ -7,6 +7,7 @@
 #include <sof/trace/trace.h>
 #include <sof/lib/uuid.h>
 
+#include <sof/audio/module_adapter/module/generic.h>
 #include <sof/audio/ring_buffer.h>
 #include <sof/audio/component.h>
 
@@ -93,11 +94,11 @@ static void ring_buffer_free(struct sof_audio_buffer *audio_buffer)
 	if (!audio_buffer)
 		return;
 
-	struct ring_buffer *ring_buffer =
-			container_of(audio_buffer, struct ring_buffer, audio_buffer);
+	struct ring_buffer *ring_buffer = container_of(audio_buffer,
+						       struct ring_buffer, audio_buffer);
 
-	rfree((__sparse_force void *)ring_buffer->_data_buffer);
-	rfree(ring_buffer);
+	sof_heap_free(audio_buffer->heap, (__sparse_force void *)ring_buffer->_data_buffer);
+	sof_heap_free(audio_buffer->heap, ring_buffer);
 }
 
 static void ring_buffer_reset(struct sof_audio_buffer *audio_buffer)
@@ -286,13 +287,16 @@ struct ring_buffer *ring_buffer_create(struct comp_dev *dev, size_t min_availabl
 				       uint32_t id)
 {
 	struct ring_buffer *ring_buffer;
+	struct k_heap *heap = dev->mod->priv.resources.heap;
 	int memory_flags = (is_shared ? SOF_MEM_FLAG_COHERENT : 0) |
 			   user_get_buffer_memory_region(dev->drv);
 
 	/* allocate ring_buffer structure */
-	ring_buffer = rzalloc(memory_flags, sizeof(*ring_buffer));
+	ring_buffer = sof_heap_alloc(heap, memory_flags, sizeof(*ring_buffer), 0);
 	if (!ring_buffer)
 		return NULL;
+
+	memset(ring_buffer, 0, sizeof(*ring_buffer));
 
 	/* init base structure. The audio_stream_params is NULL because ring_buffer
 	 * is currently used as a secondary buffer for DP only
@@ -303,6 +307,7 @@ struct ring_buffer *ring_buffer_create(struct comp_dev *dev, size_t min_availabl
 	audio_buffer_init(&ring_buffer->audio_buffer, BUFFER_TYPE_RING_BUFFER,
 			  is_shared, &ring_buffer_source_ops, &ring_buffer_sink_ops,
 			  &audio_buffer_ops, NULL);
+	ring_buffer->audio_buffer.heap = heap;
 
 	/* set obs/ibs in sink/source interfaces */
 	sink_set_min_free_space(audio_buffer_get_sink(&ring_buffer->audio_buffer),
@@ -357,12 +362,11 @@ struct ring_buffer *ring_buffer_create(struct comp_dev *dev, size_t min_availabl
 	ring_buffer->data_buffer_size = 3 * max_ibs_obs;
 
 	/* allocate data buffer - always in cached memory alias */
-	ring_buffer->data_buffer_size =
-			ALIGN_UP(ring_buffer->data_buffer_size, PLATFORM_DCACHE_ALIGN);
-	ring_buffer->_data_buffer = (__sparse_force __sparse_cache void *)
-			rballoc_align(user_get_buffer_memory_region(dev->drv),
-				      ring_buffer->data_buffer_size,
-				      PLATFORM_DCACHE_ALIGN);
+	ring_buffer->data_buffer_size = ALIGN_UP(ring_buffer->data_buffer_size,
+						 PLATFORM_DCACHE_ALIGN);
+	ring_buffer->_data_buffer = (__sparse_force __sparse_cache void *)sof_heap_alloc(heap,
+					user_get_buffer_memory_region(dev->drv),
+					ring_buffer->data_buffer_size, PLATFORM_DCACHE_ALIGN);
 	if (!ring_buffer->_data_buffer)
 		goto err;
 
@@ -374,6 +378,6 @@ struct ring_buffer *ring_buffer_create(struct comp_dev *dev, size_t min_availabl
 	return ring_buffer;
 err:
 	tr_err(&ring_buffer_tr, "Ring buffer creation failure");
-	rfree(ring_buffer);
+	sof_heap_free(heap, ring_buffer);
 	return NULL;
 }

@@ -70,6 +70,10 @@ static struct k_heap *module_adapter_dp_heap_new(const struct comp_ipc_config *c
 	void *mod_heap_buf = mod_heap_mem + heap_prefix_size;
 
 	k_heap_init(mod_heap, mod_heap_buf, heap_size - heap_prefix_size);
+#ifdef __ZEPHYR__
+	mod_heap->heap.init_mem = mod_heap_buf;
+	mod_heap->heap.init_bytes = heap_size - heap_prefix_size;
+#endif
 
 	return mod_heap;
 }
@@ -183,14 +187,21 @@ struct comp_dev *module_adapter_new_ext(const struct comp_driver *drv,
 	if (!mod)
 		return NULL;
 
+	struct comp_dev *dev = mod->dev;
+
+#if CONFIG_ZEPHYR_DP_SCHEDULER
+	/* create a task for DP processing */
+	if (config->proc_domain == COMP_PROCESSING_DOMAIN_DP) {
+		/* All data allocated, create a thread */
+		pipeline_comp_dp_task_init(dev);
+	}
+#endif /* CONFIG_ZEPHYR_DP_SCHEDULER */
 
 	module_set_private_data(mod, mod_priv);
 	list_init(&mod->raw_data_buffers_list);
 #if CONFIG_USERSPACE
 	mod->user_ctx = user_ctx;
 #endif /* CONFIG_USERSPACE */
-
-	struct comp_dev *dev = mod->dev;
 
 	dst = &mod->priv.cfg;
 	ret = module_adapter_init_data(dev, dst, config, spec);
@@ -238,12 +249,6 @@ struct comp_dev *module_adapter_new_ext(const struct comp_driver *drv,
 		goto err;
 	}
 
-#if CONFIG_ZEPHYR_DP_SCHEDULER
-	/* create a task for DP processing */
-	if (config->proc_domain == COMP_PROCESSING_DOMAIN_DP)
-		pipeline_comp_dp_task_init(dev);
-#endif /* CONFIG_ZEPHYR_DP_SCHEDULER */
-
 	module_adapter_reset_data(dst);
 
 	dev->state = COMP_STATE_READY;
@@ -269,6 +274,10 @@ struct comp_dev *module_adapter_new_ext(const struct comp_driver *drv,
 	return dev;
 
 err:
+#if CONFIG_ZEPHYR_DP_SCHEDULER
+	if (dev->task)
+		schedule_task_free(dev->task);
+#endif
 	module_adapter_mem_free(mod);
 
 	return NULL;
@@ -1348,6 +1357,9 @@ void module_adapter_free(struct comp_dev *dev)
 	struct list_item *blist, *_blist;
 
 	comp_dbg(dev, "start");
+
+	if (dev->task)
+		schedule_task_cancel(dev->task);
 
 	ret = module_free(mod);
 	if (ret)

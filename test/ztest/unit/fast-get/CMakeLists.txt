@@ -16,7 +16,6 @@ target_include_directories(app PRIVATE
 
 # Define SOF-specific configurations for unit testing
 target_compile_definitions(app PRIVATE
-	-DCONFIG_SOF_LOG_LEVEL=CONFIG_LOG_DEFAULT_LEVEL
 	-DCONFIG_ZEPHYR_POSIX=1
 )
 
@@ -25,7 +24,7 @@ target_sources(app PRIVATE
 	${SOF_ROOT}/zephyr/lib/fast-get.c
 )
 
-target_link_libraries(app PRIVATE "-Wl,--wrap=rzalloc,--wrap=rmalloc,--wrap=rfree")
+target_link_libraries(app PRIVATE "-Wl,--wrap=rzalloc,--wrap=rfree,--wrap=sof_heap_alloc,--wrap=sof_heap_free")
 
 # Add RELATIVE_FILE definitions for SOF trace functionality
 sof_append_relative_path_definitions(app)

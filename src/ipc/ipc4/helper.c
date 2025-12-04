@@ -321,6 +321,7 @@ __cold static int ipc_pipeline_module_free(uint32_t pipeline_id)
 
 		/* free sink buffer allocated by current component in bind function */
 		comp_dev_for_each_consumer_safe(icd->cd, buffer, safe) {
+			pipeline_disconnect(icd->cd, buffer, PPL_CONN_DIR_COMP_TO_BUFFER);
 			struct comp_dev *sink = comp_buffer_get_sink_component(buffer);
 
 			/* free the buffer only when the sink module has also been disconnected */
@@ -612,8 +613,10 @@ __cold int ipc_comp_connect(struct ipc *ipc, ipc_pipe_comp_connect *_connect)
 						 sink_get_min_free_space(snk),
 						 audio_buffer_is_shared(&buffer->audio_buffer),
 						 buf_get_id(buffer));
-		if (!ring_buffer)
-			goto free;
+		if (!ring_buffer) {
+			buffer_free(buffer);
+			return IPC4_OUT_OF_MEMORY;
+		}
 
 		/* data destination module needs to use ring_buffer */
 		audio_buffer_attach_secondary_buffer(&buffer->audio_buffer, dp_on_source,

@@ -21,6 +21,10 @@
 
 #define SHARED_BUFFER_HEAP_MEM_SIZE	0
 
+#if CONFIG_L3_HEAP && CONFIG_MMU
+#include <kernel_arch_interface.h>
+#endif
+
 #if CONFIG_VIRTUAL_HEAP
 #include <sof/lib/regions_mm.h>
 #include <zephyr/drivers/mm/mm_drv_intel_adsp_mtl_tlb.h>
@@ -151,6 +155,25 @@ extern char _end[], _heap_sentry[];
 
 static struct k_heap sof_heap;
 
+/**
+ * Checks whether pointer is from a given heap memory.
+ * @param heap Pointer to a heap.
+ * @param ptr Pointer to memory being checked.
+ * @return True if pointer falls into heap memory region, false otherwise.
+ */
+static bool is_heap_pointer(const struct k_heap *heap, void *ptr)
+{
+	uintptr_t heap_start =
+		POINTER_TO_UINT(sys_cache_cached_ptr_get(heap->heap.init_mem));
+	uintptr_t heap_end = heap_start + heap->heap.init_bytes;
+
+	if (!sys_cache_is_ptr_cached(ptr))
+		ptr = (__sparse_force void *)sys_cache_cached_ptr_get(ptr);
+
+	return ((POINTER_TO_UINT(ptr) >= heap_start) &&
+		(POINTER_TO_UINT(ptr) < heap_end));
+}
+
 #if CONFIG_SOF_USERSPACE_USE_SHARED_HEAP
 static struct k_heap shared_buffer_heap;
 
@@ -159,7 +182,7 @@ static bool is_shared_buffer_heap_pointer(void *ptr)
 	uintptr_t shd_heap_start = POINTER_TO_UINT(shared_heapmem);
 	uintptr_t shd_heap_end = POINTER_TO_UINT(shared_heapmem + SHARED_BUFFER_HEAP_MEM_SIZE);
 
-	if (is_cached(ptr))
+	if (sys_cache_is_ptr_cached(ptr))
 		ptr = sys_cache_uncached_ptr_get((__sparse_force void __sparse_cache *)ptr);
 
 	return (POINTER_TO_UINT(ptr) >= shd_heap_start) && (POINTER_TO_UINT(ptr) < shd_heap_end);
@@ -217,7 +240,9 @@ static inline size_t get_l3_heap_size(void)
 	  * - IMR base address
 	  * - actual IMR heap start
 	  */
-	return ROUND_DOWN(IMR_L3_HEAP_SIZE, L3_MEM_PAGE_SIZE);
+	size_t offset = IMR_L3_HEAP_BASE - L3_MEM_BASE_ADDR;
+
+	return ROUND_DOWN(ace_imr_get_mem_size() - offset, L3_MEM_PAGE_SIZE);
 }
 
 void l3_heap_save(void)
@@ -292,8 +317,12 @@ static void *virtual_heap_alloc(struct vmh_heap *heap, uint32_t flags, size_t by
 {
 	void *mem = vmh_alloc(heap, bytes);
 
-	if (!mem)
+	if (!mem) {
+#ifdef CONFIG_SYS_MEM_BLOCKS_RUNTIME_STATS
+		vmh_log_stats(heap);
+#endif
 		return NULL;
+	}
 
 	assert(align == 0 || IS_ALIGNED(mem, align));
 
@@ -316,7 +345,7 @@ static bool is_virtual_heap_pointer(void *ptr)
 		POINTER_TO_UINT(sys_cache_cached_ptr_get(&_unused_ram_start_marker));
 	uintptr_t virtual_heap_end = CONFIG_KERNEL_VM_BASE + CONFIG_KERNEL_VM_SIZE;
 
-	if (!is_cached(ptr))
+	if (!sys_cache_is_ptr_cached(ptr))
 		ptr = (__sparse_force void *)sys_cache_cached_ptr_get(ptr);
 
 	return ((POINTER_TO_UINT(ptr) >= virtual_heap_start) &&
@@ -438,7 +467,7 @@ static void heap_free(struct k_heap *h, void *mem)
 #ifdef CONFIG_SOF_ZEPHYR_HEAP_CACHED
 	void *mem_uncached;
 
-	if (is_cached(mem)) {
+	if (sys_cache_is_ptr_cached(mem)) {
 		mem_uncached = sys_cache_uncached_ptr_get((__sparse_force void __sparse_cache *)mem);
 		sys_cache_data_flush_and_invd_range(mem,
 				sys_heap_usable_size(&h->heap, mem_uncached));
@@ -622,7 +651,7 @@ EXPORT_SYMBOL(rfree);
 void *sof_heap_alloc(struct k_heap *heap, uint32_t flags, size_t bytes,
 		     size_t alignment)
 {
-	if (flags & SOF_MEM_FLAG_LARGE_BUFFER)
+	if (flags & (SOF_MEM_FLAG_LARGE_BUFFER | SOF_MEM_FLAG_USER_SHARED_BUFFER))
 		return rballoc_align(flags, bytes, alignment);
 
 	if (!heap)
@@ -636,7 +665,7 @@ void *sof_heap_alloc(struct k_heap *heap, uint32_t flags, size_t bytes,
 
 void sof_heap_free(struct k_heap *heap, void *addr)
 {
-	if (heap && addr)
+	if (heap && addr && is_heap_pointer(heap, addr))
 		heap_free(heap, addr);
 	else
 		rfree(addr);
@@ -651,11 +680,20 @@ static int heap_init(void)
 #endif
 
 #if CONFIG_L3_HEAP
-	if (l3_heap_copy.heap.heap)
-		l3_heap = l3_heap_copy;
-	else
-		sys_heap_init(&l3_heap.heap, UINT_TO_POINTER(get_l3_heap_start()),
-			      get_l3_heap_size());
+	if (ace_imr_used()) {
+		void *l3_heap_start = UINT_TO_POINTER(get_l3_heap_start());
+		size_t l3_heap_size = get_l3_heap_size();
+#if CONFIG_MMU
+		void *cached_ptr = sys_cache_cached_ptr_get(l3_heap_start);
+		uintptr_t va = POINTER_TO_UINT(cached_ptr);
+
+		arch_mem_map(l3_heap_start, va, l3_heap_size, K_MEM_PERM_RW | K_MEM_CACHE_WB);
+#endif
+		if (l3_heap_copy.heap.heap)
+			l3_heap = l3_heap_copy;
+		else
+			sys_heap_init(&l3_heap.heap, l3_heap_start, l3_heap_size);
+	}
 #endif
 
 	return 0;

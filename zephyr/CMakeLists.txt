@@ -2,7 +2,7 @@
 # compile every Zephyr module that can be found. See
 # sof/zephyr/module.yml and
 # https://docs.zephyrproject.org/latest/develop/modules.html
-if(CONFIG_SOF)
+if(CONFIG_SOF_FULL_ZEPHYR_APPLICATION)
 
 if(CONFIG_ZEPHYR_POSIX)
 	set(ARCH host)
@@ -490,6 +490,12 @@ if(NOT DEFINED PLATFORM)
 endif()
 zephyr_include_directories(${SOF_PLATFORM_PATH}/${PLATFORM}/include)
 
+zephyr_library_sources_ifdef(CONFIG_USERSPACE
+	syscall/sof_dma.c
+)
+
+zephyr_syscall_header(include/sof/lib/sof_dma.h)
+
 # Mandatory Files used on all platforms.
 # Commented files will be added/removed as integration dictates.
 zephyr_library_sources(
@@ -529,6 +535,8 @@ zephyr_library_sources_ifdef(CONFIG_SHELL
        sof_shell.c
 )
 
+zephyr_syscall_header(${SOF_SRC_PATH}/include/sof/lib/fast-get.h)
+
 zephyr_library_link_libraries(SOF)
 target_link_libraries(SOF INTERFACE zephyr_interface)
 
@@ -567,4 +575,4 @@ include(../scripts/cmake/uuid-registry.cmake)
 # Create Trace realtive file paths
 sof_append_relative_path_definitions(modules_sof)
 
-endif() # CONFIG_SOF
+endif() # CONFIG_SOF_FULL_ZEPHYR_APPLICATION
