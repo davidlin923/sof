@@ -102,6 +102,10 @@ index = __COUNTER__
 #include <audio/aria/aria.toml>
 #endif
 
+#if defined(CONFIG_COMP_DOLBY_DAX_AUDIO_PROCESSING) || defined(LLEXT_FORCE_ALL_MODULAR)
+#include <audio/module_adapter/module/dolby/dax.toml>
+#endif
+
 #if defined(CONFIG_COMP_DRC) || defined(LLEXT_FORCE_ALL_MODULAR)
 #include <audio/drc/drc.toml>
 #endif
@@ -148,6 +152,14 @@ index = __COUNTER__
 
 #if defined(CONFIG_COMP_SOUND_DOSE) || defined(LLEXT_FORCE_ALL_MODULAR)
 #include <audio/sound_dose/sound_dose.toml>
+#endif
+
+#if defined(CONFIG_COMP_TONE) || defined(LLEXT_FORCE_ALL_MODULAR)
+#include <audio/tone/tone.toml>
+#endif
+
+#if defined(CONFIG_COMP_STFT_PROCESS) || defined(LLEXT_FORCE_ALL_MODULAR)
+#include <audio/stft_process/stft_process.toml>
 #endif
 
 [module]

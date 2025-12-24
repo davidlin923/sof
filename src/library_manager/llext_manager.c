@@ -125,7 +125,7 @@ static int llext_manager_load_data_from_storage(const struct sys_mm_drv_region *
 		int ret = llext_get_section_info(ldr, ext, i, &shdr, &s_region, &s_offset);
 
 		if (ret < 0) {
-			tr_err(lib_manager_tr, "no section info: %d", ret);
+			tr_err(&lib_manager_tr, "no section info: %d", ret);
 			continue;
 		}
 
@@ -251,11 +251,15 @@ static int llext_manager_load_module(struct lib_manager_module *mctx)
 	const struct sys_mm_drv_region *virtual_memory_regions = sys_mm_drv_query_memory_regions();
 	const struct sys_mm_drv_region *virtual_region;
 
+	if (!virtual_memory_regions)
+		return -EFAULT;
+
 	SYS_MM_DRV_MEMORY_REGION_FOREACH(virtual_memory_regions, virtual_region) {
 		if (virtual_region->attr == VIRTUAL_REGION_LLEXT_LIBRARIES_ATTR)
 			break;
 	}
-	if (!virtual_region || !virtual_region->size)
+
+	if (!virtual_region->size)
 		return -EFAULT;
 
 	/* Copy Code */
@@ -287,7 +291,8 @@ static int llext_manager_load_module(struct lib_manager_module *mctx)
 	return 0;
 
 e_rodata:
-	llext_manager_align_unmap(va_base_rodata, rodata_size);
+	if (rodata_size)
+		llext_manager_align_unmap(va_base_rodata, rodata_size);
 e_text:
 	llext_manager_align_unmap(va_base_text, text_size);
 
@@ -733,6 +738,21 @@ static int llext_manager_add_partition(struct k_mem_domain *domain,
 	return k_mem_domain_add_partition(domain, &part);
 }
 
+static int llext_manager_rm_partition(struct k_mem_domain *domain,
+				       uintptr_t addr, size_t size,
+				       k_mem_partition_attr_t attr)
+{
+	size_t pre_pad_size = addr & (PAGE_SZ - 1);
+	struct k_mem_partition part = {
+		.start = addr - pre_pad_size,
+		.size = ALIGN_UP(pre_pad_size + size, PAGE_SZ),
+		.attr = attr,
+	};
+
+	tr_dbg(&lib_manager_tr, "remove %#zx @ %lx partition", part.size, part.start);
+	return k_mem_domain_remove_partition(domain, &part);
+}
+
 int llext_manager_add_domain(const uint32_t component_id, struct k_mem_domain *domain)
 {
 	const uint32_t module_id = IPC4_MOD_ID(component_id);
@@ -740,7 +760,8 @@ int llext_manager_add_domain(const uint32_t component_id, struct k_mem_domain *d
 	const uint32_t entry_index = LIB_MANAGER_GET_MODULE_INDEX(module_id);
 	const unsigned int mod_idx = llext_manager_mod_find(ctx, entry_index);
 	struct lib_manager_module *mctx = ctx->mod + mod_idx;
-	int ret;
+	const struct llext *ext = mctx->llext;
+	const struct llext_loader *ldr = &mctx->ebl->loader;
 
 	/* Executable code (.text) */
 	uintptr_t va_base_text = mctx->segment[LIB_MANAGER_TEXT].addr;
@@ -754,8 +775,9 @@ int llext_manager_add_domain(const uint32_t component_id, struct k_mem_domain *d
 	uintptr_t va_base_data = mctx->segment[LIB_MANAGER_DATA].addr;
 	size_t data_size = mctx->segment[LIB_MANAGER_DATA].size;
 
-	ret = llext_manager_add_partition(domain, va_base_text, text_size,
-					  K_MEM_PARTITION_P_RX_U_RX);
+	int ret = llext_manager_add_partition(domain, va_base_text, text_size,
+					      K_MEM_PARTITION_P_RX_U_RX);
+
 	if (ret < 0)
 		return ret;
 
@@ -763,17 +785,182 @@ int llext_manager_add_domain(const uint32_t component_id, struct k_mem_domain *d
 		ret = llext_manager_add_partition(domain, va_base_rodata, rodata_size,
 						  K_MEM_PARTITION_P_RO_U_RO);
 		if (ret < 0)
-			return ret;
+			goto e_text;
 	}
 
 	if (data_size) {
 		ret = llext_manager_add_partition(domain, va_base_data, data_size,
 						  K_MEM_PARTITION_P_RW_U_RW);
 		if (ret < 0)
-			return ret;
+			goto e_rodata;
+	}
+
+	elf_shdr_t shdr_cold, shdr_coldrodata;
+	bool rodata = false, text = false;
+	const void *rodata_addr = NULL, *text_addr = NULL;
+	size_t text_offset = 0, rodata_offset = 0;
+
+	shdr_cold.sh_size = 0;
+	shdr_coldrodata.sh_size = 0;
+
+	ret = llext_get_section_header((struct llext_loader *)ldr, (struct llext *)ext,
+				       ".cold", &shdr_cold);
+	if (ret < 0)
+		tr_warn(&lib_manager_tr, "couldn't get .cold header");
+	else
+		llext_get_region_info(ldr, ext, LLEXT_MEM_TEXT, NULL, &text_addr, NULL);
+
+	ret = llext_get_section_header((struct llext_loader *)ldr, (struct llext *)ext,
+				       ".coldrodata", &shdr_coldrodata);
+	if (ret < 0)
+		tr_warn(&lib_manager_tr, "couldn't get .coldrodata header");
+	else
+		llext_get_region_info(ldr, ext, LLEXT_MEM_RODATA, NULL, &rodata_addr, NULL);
+
+	for (unsigned int i = 0; i < llext_section_count(ext) && (!rodata || !text); i++) {
+		const elf_shdr_t *shdr;
+		enum llext_mem s_region = LLEXT_MEM_COUNT;
+		size_t s_offset = 0;
+
+		ret = llext_get_section_info(ldr, ext, i, &shdr, &s_region, &s_offset);
+		if (ret < 0)
+			continue;
+
+		switch (s_region) {
+		case LLEXT_MEM_TEXT:
+			if (shdr_cold.sh_size &&
+			    shdr->sh_name == shdr_cold.sh_name &&
+			    shdr->sh_offset == shdr_cold.sh_offset && !text) {
+				text = true;
+				text_offset = s_offset;
+			}
+			break;
+		case LLEXT_MEM_RODATA:
+			if (shdr_coldrodata.sh_size &&
+			    shdr->sh_name == shdr_coldrodata.sh_name &&
+			    shdr->sh_offset == shdr_coldrodata.sh_offset && !rodata) {
+				rodata = true;
+				rodata_offset = s_offset;
+			}
+			break;
+		default:
+			break;
+		}
+	}
+
+	if (text) {
+		tr_dbg(&lib_manager_tr, ".cold %#x @ %#lx",
+		       shdr_cold.sh_size, (uintptr_t)text_addr + text_offset);
+		ret = llext_manager_add_partition(domain, (uintptr_t)text_addr + text_offset,
+						  shdr_cold.sh_size,
+						  K_MEM_PARTITION_P_RX_U_RX);
+		if (ret < 0)
+			goto e_data;
+		mctx->segment[LIB_MANAGER_COLD].addr = (uintptr_t)text_addr + text_offset;
+		mctx->segment[LIB_MANAGER_COLD].size = shdr_cold.sh_size;
+	}
+
+	if (rodata) {
+		tr_dbg(&lib_manager_tr, ".coldrodata %#x @ %#lx",
+		       shdr_coldrodata.sh_size, (uintptr_t)rodata_addr + rodata_offset);
+		ret = llext_manager_add_partition(domain, (uintptr_t)rodata_addr + rodata_offset,
+						  shdr_coldrodata.sh_size,
+						  K_MEM_PARTITION_P_RO_U_RO);
+		if (ret < 0)
+			goto e_cold;
+		mctx->segment[LIB_MANAGER_COLDRODATA].addr = (uintptr_t)rodata_addr + rodata_offset;
+		mctx->segment[LIB_MANAGER_COLDRODATA].size = shdr_coldrodata.sh_size;
 	}
 
 	return 0;
+
+e_cold:
+	llext_manager_rm_partition(domain, (uintptr_t)text_addr + text_offset, shdr_cold.sh_size,
+				   K_MEM_PARTITION_P_RX_U_RX);
+	mctx->segment[LIB_MANAGER_COLD].addr = 0;
+	mctx->segment[LIB_MANAGER_COLD].size = 0;
+e_data:
+	llext_manager_rm_partition(domain, va_base_data, data_size, K_MEM_PARTITION_P_RW_U_RW);
+e_rodata:
+	llext_manager_rm_partition(domain, va_base_rodata, rodata_size, K_MEM_PARTITION_P_RO_U_RO);
+e_text:
+	llext_manager_rm_partition(domain, va_base_text, text_size, K_MEM_PARTITION_P_RX_U_RX);
+	return ret;
+}
+
+int llext_manager_rm_domain(const uint32_t component_id, struct k_mem_domain *domain)
+{
+	const uint32_t module_id = IPC4_MOD_ID(component_id);
+	struct lib_manager_mod_ctx *ctx = lib_manager_get_mod_ctx(module_id);
+	const uint32_t entry_index = LIB_MANAGER_GET_MODULE_INDEX(module_id);
+	const unsigned int mod_idx = llext_manager_mod_find(ctx, entry_index);
+	struct lib_manager_module *mctx = ctx->mod + mod_idx;
+
+	/* Executable code (.text) */
+	uintptr_t va_base_text = mctx->segment[LIB_MANAGER_TEXT].addr;
+	size_t text_size = mctx->segment[LIB_MANAGER_TEXT].size;
+
+	/* Read-only data (.rodata and others) */
+	uintptr_t va_base_rodata = mctx->segment[LIB_MANAGER_RODATA].addr;
+	size_t rodata_size = mctx->segment[LIB_MANAGER_RODATA].size;
+
+	/* Writable data (.data, .bss and others) */
+	uintptr_t va_base_data = mctx->segment[LIB_MANAGER_DATA].addr;
+	size_t data_size = mctx->segment[LIB_MANAGER_DATA].size;
+
+	int err, ret = llext_manager_rm_partition(domain, va_base_text, text_size,
+						  K_MEM_PARTITION_P_RX_U_RX);
+
+	if (ret < 0)
+		tr_err(&lib_manager_tr, "failed to remove .text memory partition: %d", ret);
+
+	if (rodata_size) {
+		err = llext_manager_rm_partition(domain, va_base_rodata, rodata_size,
+						 K_MEM_PARTITION_P_RO_U_RO);
+		if (err < 0) {
+			tr_err(&lib_manager_tr, "failed to remove .rodata memory partition: %d",
+			       err);
+			if (!ret)
+				ret = err;
+		}
+	}
+
+	if (data_size) {
+		err = llext_manager_rm_partition(domain, va_base_data, data_size,
+						 K_MEM_PARTITION_P_RW_U_RW);
+		if (err < 0) {
+			tr_err(&lib_manager_tr, "failed to remove .data memory partition: %d", err);
+			if (!ret)
+				ret = err;
+		}
+	}
+
+	if (mctx->segment[LIB_MANAGER_COLD].addr) {
+		err = llext_manager_rm_partition(domain,
+						 mctx->segment[LIB_MANAGER_COLD].addr,
+						 mctx->segment[LIB_MANAGER_COLD].size,
+						 K_MEM_PARTITION_P_RX_U_RX);
+		if (err < 0) {
+			tr_err(&lib_manager_tr, "failed to remove .cold memory partition: %d", err);
+			if (!ret)
+				ret = err;
+		}
+	}
+
+	if (mctx->segment[LIB_MANAGER_COLDRODATA].addr) {
+		err = llext_manager_rm_partition(domain,
+						 mctx->segment[LIB_MANAGER_COLDRODATA].addr,
+						 mctx->segment[LIB_MANAGER_COLDRODATA].size,
+						 K_MEM_PARTITION_P_RO_U_RO);
+		if (err < 0) {
+			tr_err(&lib_manager_tr,
+			       "failed to remove .coldrodata memory partition: %d", err);
+			if (!ret)
+				ret = err;
+		}
+	}
+
+	return ret;
 }
 #endif
 

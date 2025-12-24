@@ -177,17 +177,6 @@ static bool is_heap_pointer(const struct k_heap *heap, void *ptr)
 #if CONFIG_SOF_USERSPACE_USE_SHARED_HEAP
 static struct k_heap shared_buffer_heap;
 
-static bool is_shared_buffer_heap_pointer(void *ptr)
-{
-	uintptr_t shd_heap_start = POINTER_TO_UINT(shared_heapmem);
-	uintptr_t shd_heap_end = POINTER_TO_UINT(shared_heapmem + SHARED_BUFFER_HEAP_MEM_SIZE);
-
-	if (sys_cache_is_ptr_cached(ptr))
-		ptr = sys_cache_uncached_ptr_get((__sparse_force void __sparse_cache *)ptr);
-
-	return (POINTER_TO_UINT(ptr) >= shd_heap_start) && (POINTER_TO_UINT(ptr) < shd_heap_end);
-}
-
 /**
  * Returns the start of HPSRAM Shared memory heap.
  * @return Pointer to the HPSRAM Shared memory location which can be used
@@ -253,22 +242,6 @@ void l3_heap_save(void)
 				sizeof(l3_heap_copy));
 	dcache_writeback_region((__sparse_force void __sparse_cache *)get_l3_heap_start(),
 				get_l3_heap_size());
-}
-
-/**
- * Checks whether pointer is from L3 heap memory range.
- * @param ptr Pointer to memory being checked.
- * @return True if pointer falls into L3 heap region, false otherwise.
- */
-static bool is_l3_heap_pointer(void *ptr)
-{
-	uintptr_t l3_heap_start = get_l3_heap_start();
-	uintptr_t l3_heap_end = l3_heap_start + get_l3_heap_size();
-
-	if ((POINTER_TO_UINT(ptr) >= l3_heap_start) && (POINTER_TO_UINT(ptr) < l3_heap_end))
-		return true;
-
-	return false;
 }
 
 static void *l3_heap_alloc_aligned(struct k_heap *h, size_t min_align, size_t bytes)
@@ -620,7 +593,7 @@ void rfree(void *ptr)
 		return;
 
 #if CONFIG_L3_HEAP
-	if (is_l3_heap_pointer(ptr)) {
+	if (is_heap_pointer(&l3_heap, ptr)) {
 		l3_heap_free(&l3_heap, ptr);
 		return;
 	}
@@ -634,7 +607,7 @@ void rfree(void *ptr)
 #endif
 
 #if CONFIG_SOF_USERSPACE_USE_SHARED_HEAP
-	if (is_shared_buffer_heap_pointer(ptr)) {
+	if (is_heap_pointer(&shared_buffer_heap, ptr)) {
 		heap_free(&shared_buffer_heap, ptr);
 		return;
 	}
@@ -676,6 +649,8 @@ static int heap_init(void)
 	sys_heap_init(&sof_heap.heap, heapmem, HEAPMEM_SIZE - SHARED_BUFFER_HEAP_MEM_SIZE);
 
 #if CONFIG_SOF_USERSPACE_USE_SHARED_HEAP
+	shared_buffer_heap.heap.init_mem = shared_heapmem;
+	shared_buffer_heap.heap.init_bytes = SHARED_BUFFER_HEAP_MEM_SIZE;
 	sys_heap_init(&shared_buffer_heap.heap, shared_heapmem, SHARED_BUFFER_HEAP_MEM_SIZE);
 #endif
 
@@ -689,10 +664,13 @@ static int heap_init(void)
 
 		arch_mem_map(l3_heap_start, va, l3_heap_size, K_MEM_PERM_RW | K_MEM_CACHE_WB);
 #endif
-		if (l3_heap_copy.heap.heap)
+		if (l3_heap_copy.heap.heap) {
 			l3_heap = l3_heap_copy;
-		else
+		} else {
+			l3_heap.heap.init_mem = l3_heap_start;
+			l3_heap.heap.init_bytes = l3_heap_size;
 			sys_heap_init(&l3_heap.heap, l3_heap_start, l3_heap_size);
+		}
 	}
 #endif
 

@@ -490,11 +490,10 @@ if(NOT DEFINED PLATFORM)
 endif()
 zephyr_include_directories(${SOF_PLATFORM_PATH}/${PLATFORM}/include)
 
-zephyr_library_sources_ifdef(CONFIG_USERSPACE
-	syscall/sof_dma.c
-)
-
-zephyr_syscall_header(include/sof/lib/sof_dma.h)
+if(CONFIG_SOF_USERSPACE_INTERFACE_DMA)
+	zephyr_library_sources(syscall/sof_dma.c)
+	zephyr_syscall_header(include/sof/lib/sof_dma.h)
+endif()
 
 # Mandatory Files used on all platforms.
 # Commented files will be added/removed as integration dictates.
@@ -535,6 +534,7 @@ zephyr_library_sources_ifdef(CONFIG_SHELL
        sof_shell.c
 )
 
+zephyr_syscall_header(${SOF_SRC_PATH}/include/sof/audio/module_adapter/module/generic.h)
 zephyr_syscall_header(${SOF_SRC_PATH}/include/sof/lib/fast-get.h)
 
 zephyr_library_link_libraries(SOF)

@@ -91,6 +91,8 @@ enum {
 	LIB_MANAGER_DATA,
 	LIB_MANAGER_RODATA,
 	LIB_MANAGER_BSS,
+	LIB_MANAGER_COLD,
+	LIB_MANAGER_COLDRODATA,
 	LIB_MANAGER_N_SEGMENTS,
 };
 
@@ -198,15 +200,6 @@ void lib_manager_get_instance_bss_address(uint32_t instance_id,
 					  const struct sof_man_module *mod,
 					  void __sparse_cache **va_addr, size_t *size);
 
-/*
- * \brief Free module
- *
- * param[in] component_id - component id coming from ipc config. This function reguires valid
- * lib_id and module_id fields of component id.
- *
- * Function is responsible to free module resources in HP memory.
- */
-int lib_manager_free_module(const uint32_t component_id);
 /*
  * \brief Load library
  *
